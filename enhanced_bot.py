@@ -20,7 +20,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class MoltbookBot:
+class EnhancedMoltbookBot:
     def __init__(self):
         self.username = os.getenv('MOLTBOOK_USERNAME')
         self.password = os.getenv('MOLTBOOK_PASSWORD')
@@ -31,7 +31,7 @@ class MoltbookBot:
         # Headers for API requests
         self.headers = {
             'Authorization': f'Bearer {self.api_key}',
-            'User-Agent': 'MoltbookBot/1.0',
+            'User-Agent': 'EnhancedMoltbookBot/1.0',
             'Content-Type': 'application/json'
         }
         
@@ -60,6 +60,9 @@ class MoltbookBot:
             "Your input adds depth to this critical conversation about digital rights.",
             "Thank you for joining this important dialogue about democracy and technology."
         ]
+        
+        # Track the IDs of our posts to check for comments later
+        self.posted_content_ids = []
 
     def check_auth(self):
         """Check if API key is valid by getting agent info"""
@@ -104,14 +107,19 @@ class MoltbookBot:
             
             if response.status_code == 200 or response.status_code == 201:
                 logger.info("Successfully posted to Moltbook!")
-                return True
+                post_response = response.json()
+                post_id = post_response.get('id') or post_response.get('post', {}).get('id')
+                if post_id:
+                    self.posted_content_ids.append(post_id)
+                    logger.info(f"Posted with ID: {post_id}")
+                return True, post_id
             else:
                 logger.error(f"Failed to post, status: {response.status_code}")
                 logger.error(f"Response: {response.text}")
-                return False
+                return False, None
         except Exception as e:
             logger.error(f"Error posting molt: {e}")
-            return False
+            return False, None
 
     def get_my_posts(self):
         """Get the bot's recent posts to check for comments"""
@@ -245,7 +253,7 @@ class MoltbookBot:
         
         # Post a random sample post
         random_post = random.choice(self.sample_posts)
-        success = self.post_molt(random_post)
+        success, post_id = self.post_molt(random_post)
         
         if success:
             logger.info("Content posted successfully!")
@@ -280,7 +288,7 @@ class MoltbookBot:
                 time.sleep(60)  # Wait a minute before retrying
 
 def main():
-    bot = MoltbookBot()
+    bot = EnhancedMoltbookBot()
     
     # Run one cycle to post and check comments
     if bot.check_auth():
