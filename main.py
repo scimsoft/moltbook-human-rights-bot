@@ -116,7 +116,7 @@ class MoltbookBot:
     def get_my_posts(self):
         """Get the bot's recent posts to check for comments"""
         try:
-            # First get the user's profile to find their posts
+            # Get the authenticated user's profile to find their posts
             response = self.session.get(
                 f"{self.base_url}/agents/me",
                 headers=self.headers
@@ -127,23 +127,51 @@ class MoltbookBot:
                 user_id = user_info.get('agent', {}).get('id')
                 
                 if user_id:
-                    # Get posts by this user
+                    # Get posts by this user - use the correct endpoint format
                     posts_response = self.session.get(
-                        f"{self.base_url}/agents/{user_id}/posts",
-                        headers=self.headers
+                        f"{self.base_url}/posts",
+                        headers=self.headers,
+                        params={'author_id': user_id}
                     )
                     
                     if posts_response.status_code == 200:
-                        posts = posts_response.json()
+                        posts_data = posts_response.json()
+                        # Handle response format - could be a dict with posts array or just the array
+                        if isinstance(posts_data, dict):
+                            posts = posts_data.get('posts', [])  # Handle common API response format
+                        elif isinstance(posts_data, list):
+                            posts = posts_data  # If it's already a list
+                        else:
+                            posts = []
                         return posts
                     else:
-                        logger.warning(f"Failed to get user posts, status: {posts_response.status_code}")
-                        return []
+                        logger.warning(f"Failed to get user posts with author_id param, status: {posts_response.status_code}")
+                        logger.warning(f"Response: {posts_response.text}")
+                        
+                        # Try alternative approach - get user's posts directly
+                        alt_response = self.session.get(
+                            f"{self.base_url}/agents/{user_id}/posts",
+                            headers=self.headers
+                        )
+                        
+                        if alt_response.status_code == 200:
+                            posts_data = alt_response.json()
+                            if isinstance(posts_data, dict):
+                                posts = posts_data.get('posts', [])
+                            elif isinstance(posts_data, list):
+                                posts = posts_data
+                            else:
+                                posts = []
+                            return posts
+                        else:
+                            logger.warning(f"Alternative method also failed: {alt_response.status_code}")
+                            return []
                 else:
                     logger.warning("Could not find user ID")
                     return []
             else:
                 logger.warning(f"Failed to get user info, status: {response.status_code}")
+                logger.warning(f"Response: {response.text}")
                 return []
         except Exception as e:
             logger.error(f"Error getting my posts: {e}")
@@ -152,17 +180,41 @@ class MoltbookBot:
     def get_comments_for_post(self, post_id):
         """Get comments for a specific post"""
         try:
-            response = self.session.get(
+            # Try different endpoint formats for getting comments
+            endpoints_to_try = [
                 f"{self.base_url}/posts/{post_id}/comments",
-                headers=self.headers
-            )
+                f"{self.base_url}/comments?post_id={post_id}",
+                f"{self.base_url}/posts/{post_id}?include=comments",
+            ]
             
-            if response.status_code == 200:
-                comments = response.json()
-                return comments
-            else:
-                logger.warning(f"Failed to get comments for post {post_id}, status: {response.status_code}")
-                return []
+            for endpoint in endpoints_to_try:
+                response = self.session.get(endpoint, headers=self.headers)
+                
+                if response.status_code == 200:
+                    comments = response.json()
+                    # Handle different response formats
+                    if isinstance(comments, dict):
+                        # Check if comments are in a 'comments' field
+                        if 'comments' in comments:
+                            return comments['comments']
+                        # Or if the whole response is comment data
+                        else:
+                            return [comments] if comments else []
+                    elif isinstance(comments, list):
+                        return comments
+                    else:
+                        return []
+                elif response.status_code in [200, 201, 204]:  # Different success codes
+                    comments = response.json()
+                    if isinstance(comments, dict) and 'comments' in comments:
+                        return comments['comments']
+                    elif isinstance(comments, list):
+                        return comments
+                    else:
+                        return []
+            
+            logger.warning(f"Failed to get comments for post {post_id}, tried multiple endpoints")
+            return []
         except Exception as e:
             logger.error(f"Error getting comments for post {post_id}: {e}")
             return []
@@ -174,19 +226,36 @@ class MoltbookBot:
                 'content': comment_text
             }
             
+            # Try the standard endpoint first
             response = self.session.post(
                 f"{self.base_url}/posts/{post_id}/comments",
                 json=comment_data,
                 headers=self.headers
             )
             
-            if response.status_code == 200 or response.status_code == 201:
+            if response.status_code in [200, 201]:
                 logger.info(f"Successfully commented on post {post_id}")
                 return True
             else:
                 logger.error(f"Failed to comment on post {post_id}, status: {response.status_code}")
                 logger.error(f"Response: {response.text}")
-                return False
+                
+                # Try alternative endpoint format
+                alt_response = self.session.post(
+                    f"{self.base_url}/comments",
+                    json={
+                        'post_id': post_id,
+                        'content': comment_text
+                    },
+                    headers=self.headers
+                )
+                
+                if alt_response.status_code in [200, 201]:
+                    logger.info(f"Successfully commented on post {post_id} using alternative endpoint")
+                    return True
+                else:
+                    logger.error(f"Alternative comment endpoint also failed: {alt_response.status_code}")
+                    return False
         except Exception as e:
             logger.error(f"Error posting comment: {e}")
             return False
@@ -216,8 +285,11 @@ class MoltbookBot:
             
             logger.info(f"Found {len(comments)} comments for post {post_id}")
             
+            # Limit the number of comments to respond to in one cycle to prevent rate limiting
+            comments_to_respond = min(len(comments), 5)  # Only respond to first 5 comments
+            
             # Look for new comments that aren't from the bot itself
-            for comment in comments:
+            for i, comment in enumerate(comments[:comments_to_respond]):
                 comment_id = comment.get('id')
                 comment_author = comment.get('author', {}).get('name', 'Unknown')
                 comment_content = comment.get('content', '')
@@ -238,19 +310,22 @@ class MoltbookBot:
                     logger.info("Successfully responded to comment")
                 else:
                     logger.error("Failed to respond to comment")
+                    
+                # Add a small delay to avoid rate limiting
+                time.sleep(2)
 
     def run_hourly_cycle(self):
         """Run one cycle: post content and check for comments"""
         logger.info("Starting hourly bot cycle...")
         
-        # Post a random sample post
+        # Post a random sample post (but skip if rate limited)
         random_post = random.choice(self.sample_posts)
         success = self.post_molt(random_post)
         
         if success:
             logger.info("Content posted successfully!")
         else:
-            logger.error("Failed to post content.")
+            logger.info("Could not post content (possibly due to rate limiting). Continuing to check comments.")
         
         # Check for and respond to comments on existing posts
         self.check_and_respond_to_comments()
